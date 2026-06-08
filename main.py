@@ -16,6 +16,12 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -25,13 +31,13 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from bearing_capacity_engine import calculate_bearing_capacity
 
 
 APP_TITLE = "GeoTechHub Bearing Capacity API"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 
 app = FastAPI(
@@ -185,6 +191,7 @@ def bearing_capacity_pdf_endpoint(
 def build_pdf_report(result: Dict[str, Any]) -> str:
     """
     Create a calculation PDF using ReportLab and return a temporary file path.
+    Equations are rendered as LaTeX-style images using Matplotlib mathtext.
     """
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -212,16 +219,6 @@ def build_pdf_report(result: Dict[str, Any]) -> str:
         fontSize=8,
         leading=10,
         spaceAfter=4,
-    )
-
-    formula_style = ParagraphStyle(
-        "GeoTechHubFormula",
-        parent=normal_style,
-        fontName="Helvetica",
-        fontSize=8,
-        leading=10,
-        leftIndent=0,
-        rightIndent=0,
     )
 
     story: List[Any] = []
@@ -333,35 +330,24 @@ def build_pdf_report(result: Dict[str, Any]) -> str:
     story.append(Spacer(1, 0.12 * inch))
 
     story.append(Paragraph("Formula Sheet", heading_style))
-
-    formula_rows: List[List[Any]] = [["Item", "Formula"]]
-
-    for item in result.get("formula_sheet", []):
-        name = safe_text(item.get("name", "Formula"))
-        formula = safe_text(item.get("formula", ""))
-
-        formula_rows.append(
-            [
-                Paragraph(name, small_style),
-                Paragraph(formula, formula_style),
-            ]
+    story.append(
+        Paragraph(
+            "The following governing equations are provided for calculation transparency.",
+            small_style,
         )
-
-    if len(formula_rows) == 1:
-        formula_rows.append(
-            [
-                Paragraph("Formula Sheet", small_style),
-                Paragraph("No formulas were returned by the calculation engine.", formula_style),
-            ]
-        )
-
-    formula_table = Table(
-        formula_rows,
-        colWidths=[2.0 * inch, 4.85 * inch],
-        repeatRows=1,
     )
-    formula_table.setStyle(default_table_style())
-    story.append(formula_table)
+    story.append(Spacer(1, 0.05 * inch))
+
+    for formula_item in professional_pdf_formulas():
+        story.append(Paragraph(f"<b>{safe_text(formula_item['title'])}</b>", small_style))
+
+        equation_img = render_latex_equation_image(formula_item["equation"])
+        story.append(equation_img)
+
+        if formula_item.get("note"):
+            story.append(Paragraph(safe_text(formula_item["note"]), small_style))
+
+        story.append(Spacer(1, 0.12 * inch))
 
     story.append(Spacer(1, 0.2 * inch))
 
@@ -446,6 +432,139 @@ def default_table_style() -> TableStyle:
             ),
         ]
     )
+
+
+def professional_pdf_formulas() -> List[Dict[str, str]]:
+    """
+    Professional formula sheet for PDF report.
+    Equations use Matplotlib mathtext syntax.
+    """
+    return [
+        {
+            "title": "General Bearing Capacity Equation",
+            "equation": (
+                r"$q_{ult}=cN_c s_c d_c i_c+qN_q s_q d_q i_q+"
+                r"\frac{1}{2}\gamma B N_{\gamma}s_{\gamma}d_{\gamma}i_{\gamma}$"
+            ),
+            "note": "General form used by Meyerhof, Hansen, and Vesic-type bearing capacity methods.",
+        },
+        {
+            "title": "Foundation-Level Surcharge",
+            "equation": r"$q=\gamma D_f$",
+            "note": "Surcharge pressure at the foundation bearing elevation.",
+        },
+        {
+            "title": "Bearing Capacity Factor Nq",
+            "equation": r"$N_q=e^{\pi\tan\phi}\tan^2\left(45^\circ+\frac{\phi}{2}\right)$",
+            "note": "Used for drained bearing capacity where soil friction angle is considered.",
+        },
+        {
+            "title": "Bearing Capacity Factor Nc",
+            "equation": r"$N_c=\frac{N_q-1}{\tan\phi}$",
+            "note": "For phi equal to zero, the classical limiting value Nc = 5.14 is commonly used.",
+        },
+        {
+            "title": "Bearing Capacity Factor Ngamma",
+            "equation": r"$N_{\gamma}\approx2\left(N_q+1\right)\tan\phi$",
+            "note": "Approximate expression used in simplified bearing capacity calculations.",
+        },
+        {
+            "title": "Biaxial Eccentricity",
+            "equation": r"$e_x=\frac{M_y}{P},\qquad e_y=\frac{M_x}{P}$",
+            "note": "Moments are converted into load eccentricities relative to the footing centroid.",
+        },
+        {
+            "title": "Effective Footing Dimensions",
+            "equation": r"$B'=B-2e_x,\qquad L'=L-2e_y,\qquad A'=B'L'$",
+            "note": "Effective area method for eccentric vertical loading.",
+        },
+        {
+            "title": "Effective Bearing Pressure",
+            "equation": r"$q_{eff}=\frac{P}{A'}$",
+            "note": "Applied bearing pressure based on reduced effective footing area.",
+        },
+        {
+            "title": "Gross and Net Allowable Bearing",
+            "equation": (
+                r"$q_{allow,gross}=\frac{q_{ult,gross}}{FS},\qquad "
+                r"q_{allow,net}=\frac{q_{ult,net}}{FS}$"
+            ),
+            "note": "Gross bearing includes surcharge; net bearing subtracts foundation-level surcharge.",
+        },
+        {
+            "title": "Linear Contact Pressure under Biaxial Moment",
+            "equation": r"$q(x,y)=\frac{P}{A}\pm\frac{M_x y}{I_x}\pm\frac{M_y x}{I_y}$",
+            "note": "Used to estimate corner pressures and identify uplift or partial bearing.",
+        },
+        {
+            "title": "Rectangular Footing Section Properties",
+            "equation": r"$A=BL,\qquad I_x=\frac{BL^3}{12},\qquad I_y=\frac{LB^3}{12}$",
+            "note": "Plan dimensions used for linear contact pressure distribution.",
+        },
+        {
+            "title": "Sliding Factor of Safety",
+            "equation": r"$FS_{sliding}=\frac{P\tan\delta+c_aA+P_p}{H}$",
+            "note": "Passive resistance should only be included when justified by site conditions.",
+        },
+        {
+            "title": "Overturning Factor of Safety",
+            "equation": r"$FS_{OT}=\frac{M_{resisting}}{M_{overturning}}$",
+            "note": "Calculated about the principal footing axes.",
+        },
+        {
+            "title": "Elastic Settlement Estimate",
+            "equation": r"$S=\frac{qB(1-\nu^2)I_s}{E_s}$",
+            "note": "Preliminary immediate settlement estimate for service-level screening.",
+        },
+    ]
+
+
+def render_latex_equation_image(equation: str) -> Image:
+    """
+    Render a LaTeX-style equation using Matplotlib mathtext and return
+    a ReportLab Image flowable for insertion into the PDF.
+    """
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    tmp.close()
+
+    fig = plt.figure(figsize=(6.4, 0.65), dpi=220)
+    fig.patch.set_facecolor("white")
+
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
+
+    ax.text(
+        0.01,
+        0.5,
+        equation,
+        fontsize=11,
+        va="center",
+        ha="left",
+        color="black",
+    )
+
+    fig.savefig(
+        tmp.name,
+        dpi=220,
+        bbox_inches="tight",
+        pad_inches=0.08,
+        transparent=False,
+        facecolor="white",
+    )
+
+    plt.close(fig)
+
+    img = Image(tmp.name)
+
+    max_width = 6.4 * inch
+
+    if img.drawWidth > max_width:
+        scale = max_width / img.drawWidth
+        img.drawWidth *= scale
+        img.drawHeight *= scale
+
+    return img
 
 
 def flatten_for_table(
